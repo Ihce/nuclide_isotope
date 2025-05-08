@@ -1,0 +1,236 @@
+use iced::mouse::Cursor;
+use iced::widget::canvas::event::Status;
+use iced::widget::{
+    button,
+    canvas::{self, Canvas, Program},
+    column, container, row, scrollable, text,
+};
+use iced::{mouse, Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme};
+use rfd::AsyncFileDialog;
+use std::fs;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Application state
+#[derive(Default)]
+struct Isotope {
+    bytes: Vec<u8>,
+    selected: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    PickFile,
+    FilePicked(Option<std::path::PathBuf>),
+    Loaded(Vec<u8>),
+    ByteClicked(usize),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update logic
+fn update(state: &mut Isotope, message: Message) -> Task<Message> {
+    match message {
+        Message::PickFile => Task::perform(
+            async {
+                let handle = AsyncFileDialog::new().pick_file().await;
+                Message::FilePicked(handle.map(|h| h.path().to_path_buf()))
+            },
+            |m| m,
+        ),
+        Message::FilePicked(Some(path)) => Task::perform(
+            async move { fs::read(path).unwrap_or_default() },
+            Message::Loaded,
+        ),
+        Message::FilePicked(None) => Task::none(),
+        Message::Loaded(buf) => {
+            state.bytes = buf;
+            state.selected = None;
+            Task::none()
+        }
+        Message::ByteClicked(idx) => {
+            state.selected = Some(idx);
+            Task::none()
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// View
+fn view(state: &Isotope) -> Element<Message> {
+    // Byte map canvas (left)
+    let map = ByteCanvas::new(state.bytes.clone(), state.selected)
+        .width(Length::FillPortion(3))
+        .height(Length::Fill);
+
+    // Hex dump + legend (right)
+    let hex_dump = render_hex(&state.bytes, state.selected);
+    let right_panel = scrollable(column![
+        text(hex_dump).size(14).font(iced::Font::MONOSPACE),
+        byte_legend(),
+    ])
+    .height(Length::Fill)
+    .width(Length::FillPortion(1));
+
+    let content = row![map, right_panel];
+
+    container(column![
+        row![button("Open binary").on_press(Message::PickFile)],
+        content,
+    ])
+    .padding(10)
+    .into()
+}
+
+pub fn main() -> iced::Result {
+    iced::application("Isotope", update, view)
+        .theme(|_| Theme::Dark)
+        .run()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Byte‑class helpers (colors taken from binvis palette)
+fn byte_color(b: u8) -> Color {
+    match b {
+        0x00 => Color::from_rgb8(0, 0, 0),                   // black
+        0x01..=0x1F | 0x7F => Color::from_rgb8(0, 114, 178), // blue (low)
+        0x20..=0x7E => Color::from_rgb8(0, 158, 115),        // green (printable ASCII)
+        0x80..=0xFE => Color::from_rgb8(213, 94, 0),         // red (high)
+        0xFF => Color::from_rgb8(255, 255, 255),             // white
+    }
+}
+
+fn byte_legend() -> Element<'static, Message> {
+    column![
+        text("byteclass"),
+        color_swath("0x00", Color::from_rgb8(0, 0, 0)),
+        color_swath("low", Color::from_rgb8(0, 114, 178)),
+        color_swath("ascii", Color::from_rgb8(0, 158, 115)),
+        color_swath("high", Color::from_rgb8(213, 94, 0)),
+        color_swath("0xff", Color::from_rgb8(255, 255, 255)),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn color_swath<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
+    row![
+        container(text("   ").size(14))
+            .width(Length::Fixed(24.0))
+            .height(Length::Fixed(12.0))
+            .style(move |_| container::Style {
+                background: Some(color.into()),
+                ..container::Style::default()
+            }),
+        text(label),
+    ]
+    .spacing(6)
+    .into()
+}
+
+fn render_hex(bytes: &[u8], selected: Option<usize>) -> String {
+    const ROW: usize = 16;
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(ROW).enumerate() {
+        let offset = i * ROW;
+        out.push_str(&format!("{:06x} ", offset));
+        for j in 0..ROW {
+            if let Some(b) = chunk.get(j) {
+                if selected == Some(offset + j) {
+                    out.push_str(&format!("[{b:02x}]"));
+                } else {
+                    out.push_str(&format!(" {b:02x} "));
+                }
+            } else {
+                out.push_str("   ");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canvas implementation
+struct ByteCanvas {
+    bytes: Vec<u8>,
+    selected: Option<usize>,
+    cache: canvas::Cache,
+}
+
+impl ByteCanvas {
+    fn new(bytes: Vec<u8>, selected: Option<usize>) -> Canvas<Self, Message, Theme, Renderer> {
+        Canvas::new(Self {
+            bytes,
+            selected,
+            cache: canvas::Cache::new(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct ByteCanvasState;
+
+impl Program<Message, Theme, Renderer> for ByteCanvas {
+    type State = ByteCanvasState;
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: canvas::event::Event,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> (Status, Option<Message>) {
+        match event {
+            canvas::event::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let pixel = 4.0;
+                    let w = 512usize;
+                    let col = (pos.x / pixel) as usize;
+                    let row = (pos.y / pixel) as usize;
+                    let idx = row * w + col;
+                    if idx < self.bytes.len() {
+                        return (Status::Captured, Some(Message::ByteClicked(idx)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        (Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let geometry = self.cache.draw(renderer, bounds.size(), |frame| {
+            let pixel = 4.0;
+            let w = 512usize;
+            for (idx, &b) in self.bytes.iter().enumerate() {
+                let x = (idx % w) as f32 * pixel;
+                let y = (idx / w) as f32 * pixel;
+                let color = byte_color(b);
+                frame.fill_rectangle(Point::new(x, y), Size::new(pixel, pixel), color);
+            }
+            // highlight selected
+            if let Some(sel) = self.selected {
+                let x = (sel % w) as f32 * pixel;
+                let y = (sel / w) as f32 * pixel;
+                let highlight = Color::from_rgba(1.0, 1.0, 0.0, 0.6);
+                frame.fill_rectangle(Point::new(x, y), Size::new(pixel, pixel), highlight);
+            }
+        });
+        vec![geometry]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        _bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> mouse::Interaction {
+        mouse::Interaction::default()
+    }
+}

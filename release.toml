@@ -1,0 +1,13 @@
+# release.toml  ─ NO unsupported fields
+shared-version            = true          # one version for every crate
+consolidate-commits       = true          # single changelog / tag commit
+publish                   = false         # flip to true when ready to `cargo publish`
+
+# Optional quality-of-life keys (all valid)
+tag-name                  = "v{{version}}"
+tag-message               = "Release {{version}}"
+pre-release-commit-message = "chore: bump to {{version}}"
+allow-branch              = ["main"]      # only allow release from main
+# verify                  = true          # run `cargo package --list` check
+# push-remote             = "origin"      # default is origin
+
