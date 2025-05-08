@@ -11,3 +11,9 @@ tokio = { version = "1.36.0", features = ["full"] }
 ndarray = "0.15.6"
 statistical = "1.0.0"
 
+[workspace.package]
+version  = "0.0.0"
+edition  = "2021"
+license  = "MIT"
+authors  = ["Dylan Stancil"]
+repository = "https://github.com/Ihce/nuclide_isotope"
